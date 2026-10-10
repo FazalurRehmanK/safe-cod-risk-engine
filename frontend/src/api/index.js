@@ -9,7 +9,7 @@
 import axios from 'axios';
 
 const api = axios.create({
-  // With Vite's dev proxy, /api is forwarded to http://localhost:5000/api.
+  // With Vite's dev proxy, /api is forwarded to https://safe-cod-api.onrender.com/api.
   // In production, set VITE_API_URL to the deployed backend URL.
   baseURL: import.meta.env.VITE_API_URL || '/api',
   headers: { 'Content-Type': 'application/json' },

@@ -9,7 +9,7 @@ export default defineConfig({
     // This avoids hardcoding the backend URL in the frontend.
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: 'https://safe-cod-api.onrender.com',
         changeOrigin: true,
       },
     },

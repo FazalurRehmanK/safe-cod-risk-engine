@@ -228,7 +228,7 @@ cd ../frontend && npm install
 Open two terminal windows:
 
 ```bash
-# Terminal 1 — Backend API (http://localhost:5000)
+# Terminal 1 — Backend API (https://safe-cod-api.onrender.com)
 cd backend
 npm run dev
 
