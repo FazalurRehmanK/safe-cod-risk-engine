@@ -23,10 +23,8 @@ const app = express();
 
 // CORS: Allow requests from the Vite dev server (port 5173) in development.
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? process.env.CLIENT_ORIGIN
-    : ['http://localhost:5173', 'http://127.0.0.1:5173'],
-  credentials: true,
+    origin: ['http://localhost:5173', 'https://your-exact-vercel-link.vercel.app'], 
+    credentials: true,
 }));
 
 // Parse JSON request bodies.
