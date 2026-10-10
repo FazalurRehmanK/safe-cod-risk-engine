@@ -14,15 +14,11 @@
 const { Pool } = require('pg');
 
 const pool = new Pool({
-  host:     process.env.DB_HOST,
-  port:     parseInt(process.env.DB_PORT, 10),
-  database: process.env.DB_NAME,
-  user:     process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
   // Max connections in the pool. Default is 10.
   // Tune based on your PostgreSQL max_connections setting.
   max: 10,
-  // How long (ms) a client can sit idle before being removed from the pool.
   idleTimeoutMillis: 30000,
   // How long (ms) to wait for a client when the pool is exhausted.
   connectionTimeoutMillis: 2000,
