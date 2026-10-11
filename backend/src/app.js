@@ -23,7 +23,7 @@ const app = express();
 
 // CORS: Allow requests from the Vite dev server (port 5173) in development.
 app.use(cors({
-    origin: ['http://localhost:5173', 'https://your-exact-vercel-link.vercel.app'], 
+    origin: ['http://localhost:5173', 'https://safe-cod-risk-engine.vercel.app'],
     credentials: true,
 }));
 
