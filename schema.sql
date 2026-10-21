@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS users (
     phone_number    VARCHAR(15) NOT NULL UNIQUE,
     email           VARCHAR(254) UNIQUE,                    -- Optional
     role            user_role NOT NULL DEFAULT 'customer',
+    -- bcrypt hash (cost 12). Never returned in API responses or logs.
+    -- NULL means the user was created before password auth was added;
+    -- run scripts/set-password.js or re-register to set it.
+    password_hash   VARCHAR(100),
     -- Soft-delete: set to false to ban high-risk users without losing history.
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

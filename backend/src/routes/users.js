@@ -51,18 +51,13 @@ router.post('/register', async (req, res, next) => {
     // --- Insert User ---
     // The UNIQUE constraint on phone_number will throw a 23505 pg error if
     // the number already exists. Our errorHandler middleware catches that.
+    // password_hash is stored securely and never returned in any response.
     const result = await pool.query(
-      `INSERT INTO users (full_name, phone_number, email, role)
-       VALUES ($1, $2, $3, 'customer')
+      `INSERT INTO users (full_name, phone_number, email, role, password_hash)
+       VALUES ($1, $2, $3, 'customer', $4)
        RETURNING id, full_name, phone_number, email, role, created_at`,
-      [fullName, phoneNumber, email || null]
+      [fullName, phoneNumber, email || null, passwordHash]
     );
-
-    // We store the hash but we're not using it in this simplified demo.
-    // In production, add a password_hash column to the users table.
-    // For this portfolio demo, we're focusing on the COD risk logic.
-    // Storing hash in a temp variable to avoid lint warning:
-    void passwordHash;
 
     const newUser = result.rows[0];
     const token = signToken(newUser.id, newUser.role);
@@ -89,9 +84,11 @@ router.post('/login', async (req, res, next) => {
       return next(new AppError('phoneNumber and password are required.', 400));
     }
 
-    // Fetch user. We JOIN with the risk view to show the score on login.
+    // Fetch user including password_hash for comparison.
+    // We JOIN with the risk view to return the current score on login.
     const result = await pool.query(
       `SELECT u.id, u.full_name, u.phone_number, u.role, u.is_active,
+              u.password_hash,
               COALESCE(crs.risk_score, 100) AS risk_score,
               COALESCE(crs.is_cod_eligible, true) AS is_cod_eligible
        FROM users u
@@ -100,19 +97,24 @@ router.post('/login', async (req, res, next) => {
       [phoneNumber]
     );
 
-    if (result.rows.length === 0) {
+    const user = result.rows[0];
+
+    // Use a single generic error for both "not found" and "wrong password"
+    // to prevent user-enumeration attacks via timing differences.
+    // Also reject if password_hash is NULL (user existed before Issue 3 was
+    // deployed and must be migrated via scripts/set-password.js).
+    if (
+      !user ||
+      !user.password_hash ||
+      !(await bcrypt.compare(password, user.password_hash))
+    ) {
       return next(new AppError('Incorrect phone number or password.', 401));
     }
 
-    const user = result.rows[0];
-
+    // Deactivated users: check after password so the error message is consistent.
     if (!user.is_active) {
       return next(new AppError('Your account has been deactivated. Please contact support.', 403));
     }
-
-    // NOTE: In a full implementation, you'd check bcrypt.compare(password, user.password_hash).
-    // For this demo, we accept any non-empty password (focus is on the COD risk system).
-    // This is clearly communicated during portfolio presentations.
 
     const token = signToken(user.id, user.role);
 

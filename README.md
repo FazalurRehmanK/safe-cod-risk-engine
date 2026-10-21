@@ -241,10 +241,16 @@ npm run dev
 
 | Role | Phone | Password |
 |------|-------|----------|
-| Admin | `+923001234567` | *(any non-empty string)* |
+| Admin | `+923001234567` | `<set via scripts/set-password.js — fill in your chosen demo password>` |
 | Customer | Register at `/register` | *(your choice)* |
 
 > **Demo OTP:** `1234` (displayed in the verification modal for local testing)
+
+> **Setting passwords:** After running the migration, use the CLI script to set passwords for existing users:
+> ```bash
+> node backend/scripts/set-password.js +923001234567 "yourChosenPassword"
+> ```
+> Users created before this change have a `NULL` `password_hash` and **cannot log in** until their password is set via this script or they re-register with a different phone number. Never commit a real password to the repository.
 
 ---
 

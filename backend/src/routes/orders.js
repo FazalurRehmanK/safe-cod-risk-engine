@@ -117,10 +117,13 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
     }
 
     // Guard: Verify the OTP hash.
+    // 400 (Bad Request), not 401 — a wrong OTP is not an authentication
+    // failure; returning 401 would trigger the frontend's auto-logout
+    // interceptor and eject the user from their session.
     const submittedHash = hashOtp(otp);
     if (submittedHash !== order.otp_hash) {
       await client.query('ROLLBACK');
-      return next(new AppError('Incorrect OTP. Please try again.', 401));
+      return next(new AppError('Incorrect OTP. Please try again.', 400));
     }
 
     // -------------------------------------------------------------------------

@@ -98,16 +98,10 @@ const LoginPage = () => {
             </button>
           </form>
 
-          {/* Demo hint */}
-          <div className="mt-5 rounded-xl p-3 text-center"
-               style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)' }}>
-            <p className="text-brand-400 text-xs">
-              🔐 Admin demo:{' '}
-              <span className="font-mono font-bold">+923001234567</span>
-              {' '}/{' '}
-              <span className="font-mono font-bold">any password</span>
-            </p>
-          </div>
+          {/* Demo credentials note */}
+          <p className="mt-5 text-center text-xs text-slate-500">
+            Demo credentials are listed in the README.
+          </p>
 
           <p className="text-center text-sm text-slate-600 mt-5">
             Don&apos;t have an account?{' '}

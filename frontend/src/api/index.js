@@ -23,13 +23,24 @@ api.interceptors.request.use((config) => {
 });
 
 // ── Response interceptor: global 401 handling ──────────────────────────────
+// We skip the auto-logout when the 401 comes from an auth or OTP endpoint —
+// a wrong OTP or wrong password is a bad-request scenario, not an expired
+// session, and we must not clear storage or redirect in those cases.
 api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      window.location.href = '/login';
+      const url = err.config?.url || '';
+      const isAuthEndpoint =
+        url.includes('/users/login') ||
+        url.includes('/users/register') ||
+        url.endsWith('/verify-otp');
+
+      if (!isAuthEndpoint && window.location.pathname !== '/login') {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        window.location.href = '/login';
+      }
     }
     return Promise.reject(err);
   }
