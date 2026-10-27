@@ -167,6 +167,9 @@ CREATE TABLE IF NOT EXISTS orders (
     -- In production, this would be generated and sent via WhatsApp Business API.
     otp_hash            VARCHAR(64),      -- SHA-256 hash of the 6-digit OTP
     otp_expires_at      TIMESTAMPTZ,      -- OTPs expire after 10 minutes
+    -- Brute-force protection: incremented on each wrong OTP attempt.
+    -- After 5 failures the application nullifies otp_hash to lock the order.
+    otp_attempts        INTEGER NOT NULL DEFAULT 0,
     -- The risk score SNAPSHOT at the time of order placement.
     -- We store this because the live score can change, but we want to
     -- preserve what score was evaluated for this specific order for auditing.
@@ -211,70 +214,52 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
 --
 -- SCORING ALGORITHM:
 --   Base Score     : 100 points (everyone starts as trusted)
---   RTO Penalty    : -30 points per 'rto' order      (high-risk behavior)
---   Pending Penalty:  -5 points per 'pending_otp'    (indecisive/ghost orders)
---   Delivered Bonus: +10 points per 'delivered'      (proven good behavior)
+--   RTO Penalty    : -30 points per COD 'rto' order  (high-risk behavior)
+--   Pending Penalty:  -5 points per COD 'pending_otp' (ghost/abandoned orders)
+--   Delivered Bonus: +10 points per 'delivered' order — ANY payment method.
+--                    A customer who pays prepaid and receives their order has
+--                    demonstrated genuine intent; they can earn their way back.
 --   Floor          :   0 (score cannot go below zero)
 --   Ceiling        : 100 (score cannot exceed 100)
 --   COD Threshold  :  >= 40 to be eligible for COD
 --
--- EXAMPLE A: 3 RTOs, 0 deliveries
+-- EXAMPLE A: 3 COD RTOs, 0 deliveries
 --   100 + (3 * -30) = 10  -->  BLOCKED from COD
 --
--- EXAMPLE B: 1 RTO, 4 deliveries
+-- EXAMPLE B: 3 COD RTOs + 3 prepaid deliveries
+--   100 + (3 * -30) + (3 * +10) = 40  -->  COD RESTORED
+--
+-- EXAMPLE C: 1 COD RTO, 4 deliveries (any method)
 --   100 + (1 * -30) + (4 * +10) = 110  -->  CLAMPED to 100  (ALLOWED)
 -- =============================================================================
 
-CREATE OR REPLACE VIEW customer_risk_scores AS
-SELECT
-    u.id                                              AS user_id,
+DROP VIEW IF EXISTS customer_risk_scores;
+
+CREATE VIEW customer_risk_scores AS
+WITH counts AS (
+  SELECT
+    u.id           AS user_id,
     u.phone_number,
     u.full_name,
-
-    -- Count each order outcome for transparency in the admin dashboard.
-    COUNT(*) FILTER (WHERE o.status = 'delivered')    AS total_delivered,
-    COUNT(*) FILTER (WHERE o.status = 'rto')          AS total_rto,
-    COUNT(*) FILTER (WHERE o.status = 'pending_otp')  AS total_pending,
-    COUNT(*) FILTER (WHERE o.status IS NOT NULL)      AS total_orders,
-
-    -- Core risk score calculation.
-    -- GREATEST(..., 0) enforces the floor at 0.
-    -- LEAST(..., 100)  enforces the ceiling at 100.
-    LEAST(
-        GREATEST(
-            100
-            + (COUNT(*) FILTER (WHERE o.status = 'rto')          * -30)
-            + (COUNT(*) FILTER (WHERE o.status = 'delivered')    *  10)
-            + (COUNT(*) FILTER (WHERE o.status = 'pending_otp')  *  -5),
-            0   -- Floor: score cannot be negative
-        ),
-        100     -- Ceiling: score cannot exceed 100
-    )                                                 AS risk_score,
-
-    -- Derived COD eligibility flag for direct use in application logic.
-    CASE
-        WHEN LEAST(
-            GREATEST(
-                100
-                + (COUNT(*) FILTER (WHERE o.status = 'rto')          * -30)
-                + (COUNT(*) FILTER (WHERE o.status = 'delivered')    *  10)
-                + (COUNT(*) FILTER (WHERE o.status = 'pending_otp')  *  -5),
-                0
-            ),
-            100
-        ) >= 40 THEN TRUE
-        ELSE FALSE
-    END                                               AS is_cod_eligible
-
-FROM users u
--- LEFT JOIN ensures users with ZERO orders still appear in the view.
--- A brand-new customer has no history and scores 100 (maximally trusted).
-LEFT JOIN orders o
-    ON o.user_id = u.id
-   AND o.payment_method = 'cod'  -- Only COD orders affect the risk score.
-                                 -- Prepaid orders prove nothing about COD intent.
-WHERE u.role = 'customer'
-GROUP BY u.id, u.phone_number, u.full_name;
+    -- Delivered bonus: any payment method (COD or prepaid) counts.
+    COUNT(*) FILTER (WHERE o.status = 'delivered')                                AS total_delivered,
+    -- RTO and pending penalties: COD orders only.
+    COUNT(*) FILTER (WHERE o.status = 'rto'         AND o.payment_method = 'cod') AS total_rto,
+    COUNT(*) FILTER (WHERE o.status = 'pending_otp' AND o.payment_method = 'cod') AS total_pending,
+    COUNT(*) FILTER (WHERE o.status IS NOT NULL)                                   AS total_orders
+  FROM users u
+  -- LEFT JOIN (no payment_method filter) so all orders are visible.
+  -- A brand-new customer has no history and scores 100 (maximally trusted).
+  LEFT JOIN orders o ON o.user_id = u.id
+  WHERE u.role = 'customer'
+  GROUP BY u.id, u.phone_number, u.full_name
+)
+SELECT
+  user_id, phone_number, full_name,
+  total_delivered, total_rto, total_pending, total_orders,
+  LEAST(GREATEST(100 + total_rto * -30 + total_delivered * 10 + total_pending * -5, 0), 100) AS risk_score,
+  (LEAST(GREATEST(100 + total_rto * -30 + total_delivered * 10 + total_pending * -5, 0), 100) >= 40) AS is_cod_eligible
+FROM counts;
 
 
 -- =============================================================================

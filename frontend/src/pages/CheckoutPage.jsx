@@ -69,8 +69,9 @@ const CodBlockedScreen = ({ riskData, onSwitchToPrepaid, onBack }) => (
 
     <div className="w-full" style={{ background:'rgba(245,158,11,0.08)', border:'1px solid rgba(245,158,11,0.2)', borderRadius:'0.875rem', padding:'0.875rem' }}>
       <p className="text-amber-400 text-sm">
-        💡 Build your score by accepting and paying for orders. Each successful delivery adds{' '}
-        <strong>+10 points</strong>.
+        💡 Each <strong>delivered order (COD or prepaid)</strong> adds{' '}
+        <strong>+10 points</strong>. Place a prepaid order and receive it to
+        rebuild your score and restore COD access.
       </p>
     </div>
 

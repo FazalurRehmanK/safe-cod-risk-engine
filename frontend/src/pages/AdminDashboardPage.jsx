@@ -254,7 +254,7 @@ const AdminDashboardPage = () => {
                         <div className="flex gap-2 mt-1.5 text-[10px] text-slate-600">
                           <span title="Delivered" className="text-safe">▲{order.total_delivered}</span>
                           <span title="RTO" className="text-risk">▼{order.total_rto}</span>
-                          <span title="Total COD" className="text-slate-500">/{order.total_orders}</span>
+                          <span title="Total orders" className="text-slate-500">/{order.total_orders}</span>
                         </div>
                         {/* Snapshot vs live diff indicator */}
                         {order.risk_score_snapshot !== null &&

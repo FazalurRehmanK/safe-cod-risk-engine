@@ -125,8 +125,8 @@ const RegisterPage = () => {
               <p className="text-safe text-xs font-semibold mb-1">🛡️ How the Risk Score Works</p>
               <p className="text-slate-500 text-xs leading-relaxed">
                 You start at <strong className="text-slate-300">100/100</strong>.
-                Each delivered COD order earns <strong className="text-safe">+10 pts</strong>.
-                Each RTO (return) costs <strong className="text-risk">−30 pts</strong>.
+                Each delivered order earns <strong className="text-safe">+10 pts</strong>.
+                Each COD return (RTO) costs <strong className="text-risk">−30 pts</strong>.
                 Stay above <strong className="text-slate-300">40</strong> to keep COD access.
               </p>
             </div>

@@ -85,27 +85,30 @@ districts  ──< towns  ──< block_sectors  ──< addresses
 The scoring algorithm lives entirely inside PostgreSQL as a `VIEW`, not in the Express application layer. This is a deliberate architectural choice: the database is the single source of truth for risk data, and the application cannot introduce drift by computing the score differently.
 
 ```sql
-CREATE OR REPLACE VIEW customer_risk_scores AS
-SELECT
+CREATE VIEW customer_risk_scores AS
+WITH counts AS (
+  SELECT
     u.id AS user_id,
-    LEAST(
-        GREATEST(
-            100
-            + (COUNT(*) FILTER (WHERE o.status = 'rto')          * -30)
-            + (COUNT(*) FILTER (WHERE o.status = 'delivered')    *  10)
-            + (COUNT(*) FILTER (WHERE o.status = 'pending_otp')  *  -5),
-            0   -- floor
-        ),
-        100     -- ceiling
-    ) AS risk_score,
-    CASE WHEN ... >= 40 THEN TRUE ELSE FALSE END AS is_cod_eligible
-FROM users u
-LEFT JOIN orders o ON o.user_id = u.id AND o.payment_method = 'cod'
-WHERE u.role = 'customer'
-GROUP BY u.id, u.phone_number, u.full_name;
+    -- Delivered bonus: any payment method counts (COD or prepaid).
+    COUNT(*) FILTER (WHERE o.status = 'delivered')                                AS total_delivered,
+    -- Penalties apply to COD orders only.
+    COUNT(*) FILTER (WHERE o.status = 'rto'         AND o.payment_method = 'cod') AS total_rto,
+    COUNT(*) FILTER (WHERE o.status = 'pending_otp' AND o.payment_method = 'cod') AS total_pending,
+    COUNT(*) FILTER (WHERE o.status IS NOT NULL)                                   AS total_orders
+  FROM users u
+  LEFT JOIN orders o ON o.user_id = u.id
+  WHERE u.role = 'customer'
+  GROUP BY u.id, u.phone_number, u.full_name
+)
+SELECT
+  user_id, phone_number, full_name,
+  total_delivered, total_rto, total_pending, total_orders,
+  LEAST(GREATEST(100 + total_rto * -30 + total_delivered * 10 + total_pending * -5, 0), 100) AS risk_score,
+  (LEAST(GREATEST(100 + total_rto * -30 + total_delivered * 10 + total_pending * -5, 0), 100) >= 40) AS is_cod_eligible
+FROM counts;
 ```
 
-The `LEFT JOIN` is critical: new customers with zero history score **100 by default**, meaning they are trusted until proven otherwise. Only COD orders count toward the score — prepaid orders prove nothing about COD intent.
+The `LEFT JOIN` is critical: new customers with zero history score **100 by default**, meaning they are trusted until proven otherwise. **Delivered orders of any payment method** earn the +10 bonus — a customer blocked from COD can rebuild their score by placing prepaid orders and receiving them. RTO and pending penalties apply to COD orders only, since prepaid RTOs are a merchant loss, not a COD trust signal.
 
 The `orders` table also stores a `risk_score_snapshot` at the time of checkout. This creates an **immutable audit trail**: even as a customer's live score changes over time, the historical record shows exactly what score was evaluated for each order.
 

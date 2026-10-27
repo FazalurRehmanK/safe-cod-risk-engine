@@ -16,8 +16,8 @@ const router = express.Router();
 // THE ACID TRANSACTION — The Technical Centrepiece of This Portfolio Project
 // =============================================================================
 //
-// This endpoint is the most important in the entire system. It performs THREE
-// operations that MUST either ALL succeed or ALL fail together:
+// This endpoint performs THREE operations that MUST either ALL succeed or ALL
+// fail together:
 //
 //   [1] Verify the OTP hash and expiry (READ + VALIDATE)
 //   [2] Update the order status from 'pending_otp' → 'verified' (WRITE)
@@ -29,22 +29,32 @@ const router = express.Router();
 //   - A crash between steps 2 and 3 would leave the order verified but stock
 //     still not deducted — inventory would be permanently inaccurate.
 //
-// Our approach:
-//   - pool.connect() → gets a DEDICATED connection for this transaction.
-//     Using pool.query() would not work because each call might get a
-//     different connection from the pool, breaking the transaction context.
-//   - SELECT ... FOR UPDATE → row-level lock on the order. If two requests
-//     hit this endpoint simultaneously for the same order, the second one
-//     waits until the first COMMITS or ROLLBACKs.
-//   - The CHECK (stock_quantity >= 0) on the products table is the FINAL
-//     safety net. If our application-level check missed something, PostgreSQL
-//     itself will throw and trigger our ROLLBACK.
+// Key design decisions:
+//   - pool.connect() inside the try block (Issue 7): if the pool itself is
+//     unreachable, the error is caught and returned as a 500 — not an
+//     unhandled rejection that would crash the process.
+//   - let client declared before try: allows finally to safely call
+//     client.release() only when a connection was actually acquired.
+//   - SELECT ... FOR UPDATE on the order row: row-level lock prevents two
+//     concurrent requests from both passing the status check.
+//   - ORDER BY oi.product_id on the items query (Issue 7): consistent lock
+//     order across transactions eliminates the deadlock risk that would arise
+//     if two orders sharing products locked them in a different sequence.
+//   - otp_attempts counter (Issue 5): wrong OTPs increment the counter and
+//     COMMIT (the increment must persist even though verification failed).
+//     After 5 failures the OTP hash is nullified and the order is permanently
+//     locked — a correct OTP submitted afterwards returns 410, not 400.
+//   - The CHECK (stock_quantity >= 0) DB constraint is the final atomic
+//     backstop if the application-level pre-check somehow races.
 // =============================================================================
 
+const OTP_MAX_ATTEMPTS = 5;
+
 router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
-  // Acquire a dedicated client from the pool for this transaction.
-  // This client holds a single DB connection exclusively for us.
-  const client = await pool.connect();
+  // Declare client OUTSIDE the try so finally can always call release(),
+  // but assign it INSIDE the try so a pool.connect() failure is caught.
+  // (Issue 7b — unguarded connection acquisition)
+  let client;
 
   try {
     const { orderId } = req.params;
@@ -54,20 +64,25 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
       return next(new AppError('OTP is required.', 400));
     }
 
+    // Acquire a dedicated client from the pool for this transaction.
+    // Using pool.query() is wrong here — each call might get a different
+    // connection, breaking the transaction context.
+    client = await pool.connect();
+
     // =========================================================================
     // BEGIN TRANSACTION
-    // All subsequent queries on `client` are now part of this transaction.
+    // All subsequent queries on `client` are part of this transaction.
     // =========================================================================
     await client.query('BEGIN');
 
     // -------------------------------------------------------------------------
     // STEP 1: Lock & Read the Order Row
-    // `FOR UPDATE` acquires a row-level lock on this order.
-    // Any other transaction trying to update this row will BLOCK here until
-    // we COMMIT or ROLLBACK. This prevents race conditions.
+    // FOR UPDATE acquires a row-level lock. Any concurrent transaction trying
+    // to update this row will BLOCK until we COMMIT or ROLLBACK.
     // -------------------------------------------------------------------------
     const orderResult = await client.query(
-      `SELECT o.id, o.status, o.otp_hash, o.otp_expires_at, o.payment_method, o.user_id
+      `SELECT o.id, o.status, o.otp_hash, o.otp_expires_at,
+              o.otp_attempts, o.payment_method, o.user_id
        FROM orders o
        WHERE o.id = $1
        FOR UPDATE`,
@@ -108,6 +123,16 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
       return next(new AppError('OTP verification is only required for COD orders.', 400));
     }
 
+    // Guard: Null otp_hash means the OTP was invalidated (e.g. after 5 failed
+    // attempts). Return 410 Gone — the customer must place the order again.
+    // (Issue 5 — OTP-state robustness)
+    if (!order.otp_hash) {
+      await client.query('ROLLBACK');
+      return next(
+        new AppError('This OTP is no longer valid. Please place the order again.', 410)
+      );
+    }
+
     // Guard: Check OTP expiry.
     if (new Date() > new Date(order.otp_expires_at)) {
       await client.query('ROLLBACK');
@@ -116,14 +141,45 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
       );
     }
 
+    // -------------------------------------------------------------------------
     // Guard: Verify the OTP hash.
-    // 400 (Bad Request), not 401 — a wrong OTP is not an authentication
-    // failure; returning 401 would trigger the frontend's auto-logout
-    // interceptor and eject the user from their session.
+    // Wrong OTP → increment attempt counter and COMMIT (the count must persist
+    // even though the overall verification failed). Then respond with how many
+    // attempts remain — or lock the order if the limit is reached.
+    //
+    // Status 400 (Bad Request), NOT 401: a wrong OTP is not an authentication
+    // failure. Returning 401 would trigger the frontend's auto-logout
+    // interceptor and eject the user from their session (Issue 1).
+    // -------------------------------------------------------------------------
     const submittedHash = hashOtp(otp);
     if (submittedHash !== order.otp_hash) {
-      await client.query('ROLLBACK');
-      return next(new AppError('Incorrect OTP. Please try again.', 400));
+      // Increment the attempt counter. We COMMIT this so the count is durable.
+      const attemptsResult = await client.query(
+        `UPDATE orders SET otp_attempts = otp_attempts + 1
+         WHERE id = $1
+         RETURNING otp_attempts`,
+        [orderId]
+      );
+      const attempts = attemptsResult.rows[0].otp_attempts;
+
+      if (attempts >= OTP_MAX_ATTEMPTS) {
+        // Lock the order by wiping the hash — the OTP can never be used again.
+        await client.query(
+          `UPDATE orders SET otp_hash = NULL, otp_expires_at = NULL
+           WHERE id = $1`,
+          [orderId]
+        );
+        await client.query('COMMIT');
+        return next(
+          new AppError('Too many incorrect attempts. Please place the order again.', 429)
+        );
+      }
+
+      await client.query('COMMIT');
+      const remaining = OTP_MAX_ATTEMPTS - attempts;
+      return next(
+        new AppError(`Incorrect OTP. ${remaining} attempt(s) left.`, 400)
+      );
     }
 
     // -------------------------------------------------------------------------
@@ -139,29 +195,28 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
 
     // -------------------------------------------------------------------------
     // STEP 4: Fetch All Order Items for Stock Deduction
+    // ORDER BY oi.product_id (Issue 7a — deadlock prevention): ensures every
+    // concurrent transaction acquires product row locks in the same order,
+    // eliminating the circular-wait condition that causes deadlocks.
+    // FOR UPDATE OF p locks only the products rows, not the order_items rows.
     // -------------------------------------------------------------------------
     const itemsResult = await client.query(
       `SELECT oi.product_id, oi.quantity, p.name, p.stock_quantity
        FROM order_items oi
        JOIN products p ON p.id = oi.product_id
        WHERE oi.order_id = $1
-       FOR UPDATE OF p`,    // Lock the product rows too during deduction
+       ORDER BY oi.product_id
+       FOR UPDATE OF p`,
       [orderId]
     );
 
     // -------------------------------------------------------------------------
     // STEP 5: Deduct Stock for Each Item
-    // We deduct one product at a time. If ANY deduction would violate the
-    // CHECK (stock_quantity >= 0) constraint, PostgreSQL raises an exception,
-    // which our catch block intercepts → ROLLBACK.
-    //
-    // This is ACID Isolation + Consistency working together: the DB enforces
-    // the business rule even if our application logic has a gap.
+    // Application-level pre-check gives a clear error message. The DB-level
+    // CHECK (stock_quantity >= 0) is the final atomic backstop.
     // -------------------------------------------------------------------------
     for (const item of itemsResult.rows) {
-      // Application-level pre-check (for a clear error message).
       if (item.stock_quantity < item.quantity) {
-        // Manually rollback before throwing — stock is insufficient.
         await client.query('ROLLBACK');
         return next(
           new AppError(
@@ -179,14 +234,10 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
          WHERE id = $2`,
         [item.quantity, item.product_id]
       );
-      // Note: Even if our check above passes, the DB-level CHECK constraint
-      // on stock_quantity >= 0 acts as a final atomic guarantee. A concurrent
-      // transaction that also deducted stock between our check and this UPDATE
-      // would be caught here, triggering the catch block → ROLLBACK.
     }
 
     // =========================================================================
-    // COMMIT — All three operations succeeded. Changes are now permanent.
+    // COMMIT — All operations succeeded. Changes are now permanent.
     // =========================================================================
     await client.query('COMMIT');
 
@@ -205,17 +256,16 @@ router.post('/:orderId/verify-otp', protect, async (req, res, next) => {
     });
   } catch (err) {
     // =========================================================================
-    // ROLLBACK — Something failed. Every change within this transaction
-    // is undone atomically. The database is left exactly as it was before
-    // the BEGIN statement.
+    // ROLLBACK — Something failed. Every change within this transaction is
+    // undone atomically. The DB is left exactly as it was before BEGIN.
     // =========================================================================
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => {});
     return next(err);
   } finally {
-    // ALWAYS release the client back to the pool, whether we succeeded or failed.
-    // Failing to release causes connection leaks that will eventually
-    // exhaust the pool and crash the server.
-    client.release();
+    // ALWAYS release the client back to the pool.
+    // Guard with `if (client)` — pool.connect() may have failed before
+    // the assignment, in which case there is nothing to release.
+    if (client) client.release();
   }
 });
 
